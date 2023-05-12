@@ -1,0 +1,80 @@
+pipeline {
+    agent any 
+    environment {
+        PROJECT_NAME = "chassets-api"  //แก้ชื่อ Project
+        GIT_BRANCH = "dev"  //แก้ branch เช่น : dev | uat | prodoction
+        DOCKER_IMAGE_NAME = "${env.PROJECT_NAME}-${env.GIT_BRANCH}"
+        ENVIRONMENT = "${env.GIT_BRANCH}"
+        DOCKER_COMPOSE_PATH = "docker/${env.ENVIRONMENT}/docker-compose.yml" 
+    }  
+    
+    // ถ้าเปิดใช้ triggers จะ Auto Deploy เมื่อมีการเปี่ยนแปลงที่  github branch = GIT_BRANCH
+    //// ต้องทำการ Add WebHook-Github ด้วย
+    
+    // ถ้าไม่เปิด triggers ต้องเข้าไปกด ฺBuild เอง
+
+    // triggers {
+    //     githubPush()
+    // }
+    
+    stages {
+        stage('Get code from GitHub') { 
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: env.ENVIRONMENT]],
+                    userRemoteConfigs: [[
+                        //แก้ชื่อ Project
+                        url: 'git@github.com:chcorporate/chassets-api.git',
+                        credentialsId: 'github-creds'
+                    ]]
+                ])
+            }
+        }
+        stage('Check for changes') {
+            steps {
+                script {
+                    def changeLogSets = currentBuild.changeSets
+                    env.codeChanged = (changeLogSets != null && changeLogSets.size() > 0) ? 'true' : 'false'
+                    env.manualBuild = currentBuild.getBuildCauses().any{ it instanceof hudson.model.Cause.UserIdCause } ? 'true' : 'false'
+                }
+            }
+        }
+        stage('Build code') {
+            when {
+                expression { return env.codeChanged == 'true' || env.manualBuild == 'true' }
+            }
+            steps { 
+                sh "sudo /usr/local/bin/docker-compose -f ${env.DOCKER_COMPOSE_PATH} build --no-cache --progress=plain" 
+            }
+        }
+        stage('Deploy on Docker') {
+            when {
+                expression { return env.codeChanged == 'true' || env.manualBuild == 'true' }
+            }
+            steps { 
+                sh "docker stop ${env.DOCKER_IMAGE_NAME} || true"
+                sh "docker rm ${env.DOCKER_IMAGE_NAME} || true" 
+                sh "docker rmi ${env.DOCKER_IMAGE_NAME} || true"
+                sh "sudo /usr/local/bin/docker-compose -f ${env.DOCKER_COMPOSE_PATH} up -d"
+            }
+        }  
+        stage('Clean up') {
+            when {
+                expression { return env.codeChanged == 'true' || env.manualBuild == 'true' }
+            }
+            steps { 
+                sh "docker ps -a -f status=exited -f name=${env.ENVIRONMENT}_${env.DOCKER_IMAGE_NAME} | grep -v CONTAINER | awk '{print \$1}' | xargs -I {} docker rm {} || true"
+                sh "docker images -a -f dangling=true -f reference=${env.DOCKER_IMAGE_NAME} | grep -v IMAGE | awk \'{print \$3}\' | xargs -I {} docker rmi {} || true"
+
+            }
+        }
+
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
